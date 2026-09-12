@@ -217,6 +217,18 @@ shellcheck gh-as test/test.sh
 shfmt -d gh-as test/test.sh    # style comes from .editorconfig
 ```
 
+When the clone is also the installed helper, the clone's working tree is the
+machine's git authentication: a syntax error mid-edit, or a checkout of a
+branch that lacks `--git-credential`, makes every HTTPS fetch fall back to a
+username prompt. To detach git from it while you work:
+
+```console
+git config --global --unset-all credential.https://github.com.helper
+gh auth setup-git
+```
+
+and `gh as --setup-git` again when the script is whole.
+
 ## License
 
 MIT
