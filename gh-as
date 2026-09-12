@@ -23,6 +23,8 @@ Usage:
   gh-as <account> -- <command> [args...]   account named explicitly
   gh-as --print [<account>]
   gh-as --list
+  gh-as --setup-git [--host HOST]          make git fetch and push resolve the
+                                           same way (writes ~/.gitconfig)
 
 Options:
   -l, --list       List the accounts logged in on the host
@@ -30,6 +32,7 @@ Options:
   -q, --quiet      Do not announce the account on stderr
       --host HOST  Host to take the account from (default: $GH_HOST, the
                    remote's host, or github.com)
+      --setup-git  Install gh-as as git's credential helper for the host
   -h, --help       Show this help
 
 Account resolution, in order:
@@ -45,6 +48,10 @@ Environment:
 
 The token is handed to the command as GH_TOKEN (GH_ENTERPRISE_TOKEN off
 github.com), together with GH_AS_ACCOUNT. Nothing outside the process changes.
+
+As a git credential helper (installed by --setup-git, invoked by git as
+`gh-as --git-credential get`) the same resolution runs on the URL git is
+about to fetch or push, so plain git picks the account per repository too.
 USAGE
 }
 
@@ -81,10 +88,23 @@ url_host() {
   printf '%s\n' "${rest%%/*}"
 }
 
+# The owner segment of https://host/owner/repo, or nothing when the URL has
+# no path at all, which is what git sends a credential helper when
+# useHttpPath is off.
 url_owner() {
   local rest=${1#https://}
+  [[ $rest == */* ]] || return 0
   rest=${rest#*/}
   printf '%s\n' "${rest%%/*}"
+}
+
+# A stored token for the owner is a keyring read; enumerating accounts through
+# `gh auth status` validates every token over the network. Try the cheap
+# check first, since a credential helper runs on every fetch.
+has_token() {
+  local probe
+  probe=$(gh_clean auth token --hostname "$1" --user "$2" 2>/dev/null) || return 1
+  [[ -n $probe ]]
 }
 
 resolve_account() {
@@ -102,18 +122,16 @@ resolve_account() {
       printf '%s\n' "$account"
       return
     }
-  fi
 
-  known=$(accounts "$resolved_host") || known=
-  [[ -n $known ]] || die "no account logged in on $resolved_host; run: gh auth login --hostname $resolved_host"
-
-  if [[ -n $url ]]; then
     owner=$(url_owner "$url")
-    if printf '%s\n' "$known" | grep -qxF -- "$owner"; then
+    if [[ -n $owner ]] && has_token "$resolved_host" "$owner"; then
       printf '%s\n' "$owner"
       return
     fi
   fi
+
+  known=$(accounts "$resolved_host") || known=
+  [[ -n $known ]] || die "no account logged in on $resolved_host; run: gh auth login --hostname $resolved_host"
 
   if [[ $(printf '%s\n' "$known" | wc -l) -eq 1 ]]; then
     printf '%s\n' "$known"
@@ -121,6 +139,82 @@ resolve_account() {
   fi
 
   die "cannot tell which account this repository belongs to; name one of: $(printf '%s' "$known" | tr '\n' ' ')"
+}
+
+# git credential helper protocol: key=value lines on stdin up to a blank
+# line, and the same shape back on stdout. `store` and `erase` are accepted
+# and ignored, as gh's own helper does, because the tokens live in gh's
+# keyring and git has nothing to add or remove.
+credential_helper() {
+  local op=$1 line key value
+  local protocol='' cred_host='' path='' username='' cred_url=''
+
+  case $op in
+    get) ;;
+    store | erase) exit 0 ;;
+    *) die "--git-credential: unsupported operation '$op'" ;;
+  esac
+
+  while IFS= read -r line && [[ -n $line ]]; do
+    key=${line%%=*}
+    value=${line#*=}
+    case $key in
+      protocol) protocol=$value ;;
+      host) cred_host=$value ;;
+      path) path=${value#/} ;;
+      username) username=$value ;;
+      url) cred_url=$value ;;
+    esac
+  done
+
+  if [[ -n $cred_url ]]; then
+    cred_url=$(normalize_url "$cred_url")
+    cred_host=$(url_host "$cred_url")
+    protocol=https
+  elif [[ -n $path ]]; then
+    cred_url=$(normalize_url "https://$cred_host/$path")
+  else
+    cred_url=https://$cred_host
+  fi
+
+  # Anything but https is not gh's to answer; stay silent so git moves on to
+  # the next helper or the terminal.
+  [[ $protocol == https && -n $cred_host ]] || exit 0
+
+  # A username git already resolved, from credential.username or a user@host
+  # remote, is an instruction rather than a hint. gh's own helper refuses a
+  # username that differs from the active account; this one selects by it.
+  local account=$username token
+  [[ -n $account ]] || account=$(resolve_account "$cred_url" "$cred_host")
+
+  token=$(gh_clean auth token --hostname "$cred_host" --user "$account" 2>/dev/null) || token=
+  [[ -n $token ]] ||
+    die "no token for account '$account' on $cred_host; logged in are: $(accounts "$cred_host" | tr '\n' ' ')"
+
+  printf 'protocol=https\nhost=%s\nusername=%s\npassword=%s\n' "$cred_host" "$account" "$token"
+}
+
+# Point git at this script for one host. The blank helper first clears any
+# helper inherited from the system config (Apple's git ships osxkeychain
+# there), so a stale keychain entry cannot answer ahead of gh-as; useHttpPath
+# makes git hand over the repository path the resolution depends on.
+setup_git() {
+  local setup_host=$1 script section helper
+  case $0 in
+    /*) script=$0 ;;
+    */*) script=$PWD/${0#./} ;;
+    *) script=$(command -v -- "$0") ;;
+  esac
+  section=credential.https://$setup_host
+  helper="!'${script//\'/\'\\\'\'}' --git-credential"
+
+  git config --global "$section.useHttpPath" true
+  git config --global --replace-all "$section.helper" ''
+  git config --global --add "$section.helper" "$helper"
+
+  printf '%s: git will now resolve credentials for %s through %s\n' "$program" "$setup_host" "$script" >&2
+  printf '%s: declare accounts per URL with: git config --global gh-as.https://%s/<owner>.account <login>\n' "$program" "$setup_host" >&2
+  git config --global --get-regexp "^${section//./\\.}\." >&2
 }
 
 has_separator() {
@@ -134,6 +228,7 @@ has_separator() {
 }
 
 account=
+setup=
 while [[ $# -gt 0 ]]; do
   case $1 in
     --)
@@ -147,6 +242,15 @@ while [[ $# -gt 0 ]]; do
     -l | --list)
       accounts "${host:-$default_host}"
       exit 0
+      ;;
+    --git-credential)
+      [[ $# -eq 2 ]] || die "--git-credential takes exactly one operation (get, store or erase)"
+      credential_helper "$2"
+      exit 0
+      ;;
+    --setup-git)
+      setup=1
+      shift
       ;;
     -p | --print)
       print_only=1
@@ -176,6 +280,12 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -n $setup ]]; then
+  [[ $# -eq 0 && -z $account && -z $print_only ]] || die "--setup-git takes only --host"
+  setup_git "${host:-$default_host}"
+  exit 0
+fi
 
 if [[ -n $print_only && -z $account && $# -eq 1 ]]; then
   account=$1
