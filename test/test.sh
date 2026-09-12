@@ -212,10 +212,6 @@ check 'helper ignores capability lines and a leading slash on the path' \
   'alice-work|token-alice-work-github.com' \
   "$(cred get 'capability[]=authtype' protocol=https host=github.com path=/acme/service.git)"
 
-check 'helper accepts the url= form' \
-  'alice-work|token-alice-work-github.com' \
-  "$(cred get url=https://github.com/acme/service.git)"
-
 check 'helper honours a username git already resolved' \
   'alice-work|token-alice-work-github.com' \
   "$(cred get protocol=https host=github.com path=alice/blog.git username=alice-work)"
@@ -267,6 +263,28 @@ check '--setup-git --host targets that host only' \
   "$(GIT_CONFIG_GLOBAL=$setup_config "$gh_as" --setup-git --host ghe.example.com >/dev/null 2>&1 && GIT_CONFIG_GLOBAL=$setup_config git config --global credential.https://ghe.example.com.useHttpPath)"
 
 fails '--setup-git refuses extra arguments' "$gh_as" --setup-git alice -- true
+
+# A copy of the script at an awkward path must still produce a helper line
+# that sh -c can parse, under whichever bash runs the suite.
+odd_dir="$tmp/it's a dir"
+mkdir -p "$odd_dir"
+cp "$gh_as" "$odd_dir/gh-as"
+
+# Runs --setup-git from the odd path under the given bash, then parses the
+# helper line the way git will, as sh words, and prints word one and two.
+odd_helper_words() {
+  local shell=$1 config=$tmp/odd-gitconfig-${1##*/} helper
+  : >"$config"
+  GIT_CONFIG_GLOBAL=$config "$shell" "$odd_dir/gh-as" --setup-git >/dev/null 2>&1
+  helper=$(GIT_CONFIG_GLOBAL=$config git config --global --get-all credential.https://github.com.helper | tail -1)
+  sh -c 'eval "set -- $1"; printf "%s|%s" "$1" "$2"' _ "${helper#!}"
+}
+check '--setup-git quotes a path with a space and a single quote' \
+  "$odd_dir/gh-as|--git-credential" "$(odd_helper_words bash)"
+if [ -x /bin/bash ]; then
+  check '--setup-git quoting also holds under /bin/bash (3.2 on macOS)' \
+    "$odd_dir/gh-as|--git-credential" "$(odd_helper_words /bin/bash)"
+fi
 
 # End to end through git itself: the config --setup-git wrote must make
 # `git credential fill` reach the helper and pick the account by organization.

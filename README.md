@@ -60,8 +60,8 @@ gh as --setup-git
 
 To work on the script itself, install the clone rather than the release:
 `gh extension install .` inside the checkout symlinks it, and `--setup-git`
-writes the checkout's path into `~/.gitconfig`, so edits take effect on the
-next `gh as` or `git fetch`.
+writes the checkout's path into the global git config, so edits take effect
+on the next `gh as` or `git fetch`.
 
 ## Usage
 
@@ -134,26 +134,31 @@ managed organization. Rerun the listing when the enterprise gains one.
 
 ## Plain git
 
-`gh auth setup-git` makes `gh` git's credential helper, and that helper only
-ever hands out the active account's token. Asked for any other username it
-returns nothing, so a per-URL `credential.username` on its own still pushes
-as whoever happens to be active. `gh-as --setup-git` replaces it:
+`gh auth setup-git` makes `gh` git's credential helper. That helper answers
+with the active account's token (or with `GH_TOKEN` when one is set), and
+when git asks for a different username it declines, so git prompts. A
+per-URL `credential.username` therefore cannot select the other account on
+its own. `gh-as --setup-git` replaces gh's helper:
 
 ```console
 $ gh as --setup-git
 gh-as: git will now resolve credentials for github.com through /usr/local/bin/gh-as
 ```
 
-It writes three lines to `~/.gitconfig` for the host: a blank helper that
-clears anything inherited from the system config, `gh-as --git-credential` as
-the helper, and `useHttpPath = true` so git passes the repository path. From
-then on every fetch and push resolves through the list above and takes the
-token from gh's keyring. Nothing is stored in git's own credential store.
+It writes three lines to the global git config for the host: a blank helper
+that clears anything inherited from the system config, `gh-as
+--git-credential` as the helper, and `useHttpPath = true` so git passes the
+repository path. From then on every HTTPS fetch and push to that host
+resolves through the list above and takes the token from gh's storage.
+`gh-as` ignores git's `store` and `erase`, so it never writes a credential
+anywhere. SSH remotes are untouched.
 
 A username git has already resolved, from `credential.username` or a
-`https://alice-work@github.com/...` remote, is honoured as given. Running
-`gh auth setup-git` again later re-adds gh's helper after `gh-as`, which is
-harmless because helpers are tried in order.
+`https://alice-work@github.com/...` remote, is honoured as given.
+
+`gh auth setup-git` resets the host's helper list before adding gh's own
+helper, so running it again later removes `gh-as`; rerun `gh as --setup-git`
+afterwards. The same applies to any tool that rewrites that list.
 
 ## GitHub Enterprise
 
@@ -184,8 +189,10 @@ itself reads enterprise credentials.
 so `gh-as` rejects them with that explanation instead of letting `gh` fail
 obscurely. Run those directly.
 
-Wrapping `git` in `gh-as` changes nothing; git never reads `GH_TOKEN`. Use
-`--setup-git` for git and `gh-as` for everything else.
+Wrapping `git` in `gh-as` is not the way to pick git's account: the
+credential helper decides that, and `gh-as --git-credential` deliberately
+ignores any `GH_TOKEN` it inherits. Use `--setup-git` for git and `gh-as` for
+everything else.
 
 ## Claude Code
 

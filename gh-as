@@ -155,6 +155,8 @@ credential_helper() {
     *) die "--git-credential: unsupported operation '$op'" ;;
   esac
 
+  # git splits a url= into these attributes itself before calling a helper,
+  # so only the split form is read here.
   while IFS= read -r line && [[ -n $line ]]; do
     key=${line%%=*}
     value=${line#*=}
@@ -163,15 +165,10 @@ credential_helper() {
       host) cred_host=$value ;;
       path) path=${value#/} ;;
       username) username=$value ;;
-      url) cred_url=$value ;;
     esac
   done
 
-  if [[ -n $cred_url ]]; then
-    cred_url=$(normalize_url "$cred_url")
-    cred_host=$(url_host "$cred_url")
-    protocol=https
-  elif [[ -n $path ]]; then
+  if [[ -n $path ]]; then
     cred_url=$(normalize_url "https://$cred_host/$path")
   else
     cred_url=https://$cred_host
@@ -199,14 +196,19 @@ credential_helper() {
 # there), so a stale keychain entry cannot answer ahead of gh-as; useHttpPath
 # makes git hand over the repository path the resolution depends on.
 setup_git() {
-  local setup_host=$1 script section helper
+  local setup_host=$1 script quoted section helper
   case $0 in
     /*) script=$0 ;;
     */*) script=$PWD/${0#./} ;;
     *) script=$(command -v -- "$0") ;;
   esac
+  [[ $script == /* ]] || script=$PWD/$script
+  # git runs the helper through sh -c, so the path is single-quoted with any
+  # embedded quote closed, escaped and reopened. sed rather than parameter
+  # expansion because bash 3.2 mangles the backslashes in that expansion.
+  quoted=$(printf '%s' "$script" | sed "s/'/'\\\\''/g")
   section=credential.https://$setup_host
-  helper="!'${script//\'/\'\\\'\'}' --git-credential"
+  helper="!'$quoted' --git-credential"
 
   git config --global "$section.useHttpPath" true
   git config --global --replace-all "$section.helper" ''
