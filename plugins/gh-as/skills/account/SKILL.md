@@ -1,6 +1,6 @@
 ---
 name: account
-description: Run a gh command as the GitHub account a repository actually belongs to, on a machine where several accounts are logged in with gh. Use when gh reports "Could not resolve to a Repository", 404 or 403 for a repository that exists, when a push or PR must be made as a particular account, or before any gh command in a repository owned by someone other than the active account.
+description: Run a gh command as the GitHub account a repository actually belongs to, on a machine where several accounts are logged in with gh, and make git fetch and push do the same. Use when gh reports "Could not resolve to a Repository", 404 or 403 for a repository that exists, when git says "Repository not found" or "Authentication failed" for a repository that exists, when a push or PR must be made as a particular account, or before any gh command in a repository owned by someone other than the active account.
 ---
 
 # Use the account the repository belongs to
@@ -13,15 +13,21 @@ account cannot see fails as if the repository did not exist:
 GraphQL: Could not resolve to a Repository with the name 'acme/service'. (repository)
 ```
 
-Read that as an authentication mismatch, not a missing repository. The same
-cause shows up as a bare 404 from `gh api` and as 403 on a push.
+When the repository is known to exist, read that as an authentication
+mismatch first. The same cause shows up as a bare 404 from `gh api`, and from
+plain git as:
+
+```
+remote: Repository not found.
+fatal: Authentication failed for 'https://github.com/acme/service.git/'
+```
 
 ## 1. Resolve the command
 
 - `gh-as` on `PATH` (`command -v gh-as`) — call it directly.
 - Otherwise `gh extension list` showing `gh-as` — call it as `gh as`.
 - Neither: tell the user to install it and stop —
-  `gh extension install lambdalisue/gh-as`.
+  `gh extension install aberoham/gh-as`.
 
 ## 2. Rerun through it
 
@@ -55,9 +61,24 @@ avoid.
 `gh auth login`, `switch` and `logout` also refuse to run under an injected
 token, so never wrap them — run them directly.
 
-## Plain git needs no wrapper
+## Plain git goes through the credential helper, not the wrapper
 
-git resolves credentials from its own URL-keyed `[credential]` sections and the
-identity from `includeIf`, both per repository. Wrapping `git` in `gh-as`
-changes nothing. When a git operation authenticates as the wrong user, fix the
-git configuration instead of reaching for this skill.
+Do not wrap `git` in `gh-as`; git's account comes from its credential helper.
+gh's own helper (`gh auth setup-git`) returns the ACTIVE account's token and
+declines any other username, which is why a fetch or push in the other
+account's repository fails with "Repository not found".
+
+Check whether gh-as is already git's helper:
+
+```sh
+git config --global --get-all credential.https://github.com.helper
+```
+
+If no line ends in `--git-credential`, run `gh-as --setup-git` (or
+`gh as --setup-git`) once. It writes only the global git config. After that,
+git resolves the account per repository through the same rules as `gh-as`.
+If a fetch or push still fails, run `gh-as --print` in the checkout: a wrong
+or missing account means a rule is missing, which the git config line above
+fixes; the right account means the failure is something else (an expired
+token, permissions, a rejected push). Never work around any of it with
+`gh auth switch`.

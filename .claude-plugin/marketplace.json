@@ -1,10 +1,10 @@
 {
   "name": "gh-as",
   "owner": {
-    "name": "Alisue",
-    "email": "lambdalisue@gmail.com"
+    "name": "Abraham Ingersoll",
+    "url": "https://github.com/aberoham"
   },
-  "description": "A skill that teaches Claude Code to reach for gh-as when a gh command hits the wrong GitHub account, instead of switching the account the whole machine shares.",
+  "description": "A skill that teaches Claude Code to reach for gh-as when a gh or git command hits the wrong GitHub account, instead of switching the account the whole machine shares.",
   "plugins": [
     {
       "name": "gh-as",
