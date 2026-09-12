@@ -5,12 +5,18 @@ on:
     branches: [main]
   pull_request:
 
+permissions: {}
+
 jobs:
-  shellcheck:
+  lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: mfinelli/setup-shfmt@a25fda4c1fe115aec0f85e04126610841bc3141d # v4.0.1
       - run: shellcheck gh-as test/test.sh
+      - run: shfmt -d gh-as test/test.sh
 
   test:
     strategy:
@@ -22,5 +28,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: ./test/test.sh
