@@ -248,10 +248,11 @@ fails 'helper prints nothing on stdout when no account matches' \
 
 setup_config=$tmp/setup-gitconfig
 : >"$setup_config"
-GIT_CONFIG_GLOBAL=$setup_config "$gh_as" --setup-git >/dev/null 2>&1
+check '--setup-git succeeds' 'ok' \
+  "$(GIT_CONFIG_GLOBAL=$setup_config "$gh_as" --setup-git >/dev/null 2>&1 && echo ok)"
 first=$(cat "$setup_config")
-GIT_CONFIG_GLOBAL=$setup_config "$gh_as" --setup-git >/dev/null 2>&1
-check '--setup-git is idempotent' "$first" "$(cat "$setup_config")"
+check '--setup-git is idempotent' 'ok' \
+  "$(GIT_CONFIG_GLOBAL=$setup_config "$gh_as" --setup-git >/dev/null 2>&1 && [ "$first" = "$(cat "$setup_config")" ] && echo ok)"
 
 check '--setup-git resets the helper list before adding gh-as' \
   "2" \

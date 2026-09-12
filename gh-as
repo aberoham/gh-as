@@ -214,7 +214,8 @@ setup_git() {
 
   printf '%s: git will now resolve credentials for %s through %s\n' "$program" "$setup_host" "$script" >&2
   printf '%s: declare accounts per URL with: git config --global gh-as.https://%s/<owner>.account <login>\n' "$program" "$setup_host" >&2
-  git config --global --get-regexp "^${section//./\\.}\." >&2
+  printf '  %s.useHttpPath = %s\n' "$section" "$(git config --global --get "$section.useHttpPath")" >&2
+  git config --global --get-all "$section.helper" | sed "s|^|  $section.helper = |" >&2
 }
 
 has_separator() {
