@@ -110,17 +110,17 @@ other=$(repo other https://gitlab.com/alice/thing.git)
 unmapped=$(repo unmapped https://github.com/nobody/thing.git)
 
 check 'explicit account wins' \
-  'alice-work|token-alice-work-github.com||' \
+  'alice-work|token-alice-work-github.com||github.com' \
   "$(cd "$personal" && run alice-work -- sh -c "$show_env")"
 
 git -C "$work" config 'gh-as.https://github.com/acme.account' alice-work
 check 'gh-as.account resolves the account' \
-  'alice-work|token-alice-work-github.com||' \
+  'alice-work|token-alice-work-github.com||github.com' \
   "$(cd "$work" && run sh -c "$show_env")"
 
 git -C "$scp_style" config 'credential.https://github.com/acme.username' alice-work
 check 'scp-style remote resolves through credential.username' \
-  'alice-work|token-alice-work-github.com||' \
+  'alice-work|token-alice-work-github.com||github.com' \
   "$(cd "$scp_style" && run sh -c "$show_env")"
 
 git -C "$work" config 'credential.https://github.com/acme.username' alice
@@ -137,12 +137,24 @@ check 'the only logged-in account is used when nothing else matches' \
   "$(cd "$unmapped" && GH_STUB_ACCOUNTS=solo "$gh_as" --print 2>/dev/null)"
 
 check 'inherited tokens are cleared before asking gh' \
-  'alice-work|token-alice-work-github.com||' \
+  'alice-work|token-alice-work-github.com||github.com' \
   "$(cd "$personal" && GH_TOKEN=ambient run alice-work -- sh -c "$show_env")"
 
 check 'an enterprise host gets GH_ENTERPRISE_TOKEN and GH_HOST' \
   'alice||token-alice-ghe.example.com|ghe.example.com' \
   "$(cd "$personal" && run --host ghe.example.com alice -- sh -c "$show_env")"
+
+check 'Enterprise Cloud gets GH_TOKEN and GH_HOST' \
+  'alice|token-alice-example.ghe.com||example.ghe.com' \
+  "$(cd "$personal" && run --host example.ghe.com alice -- sh -c "$show_env")"
+
+check 'an explicit public host replaces an inherited enterprise host' \
+  'alice|token-alice-github.com||github.com' \
+  "$(cd "$personal" && GH_HOST=ghe.example.com run --host github.com alice -- sh -c "$show_env")"
+
+check 'a lookalike cloud suffix remains Enterprise Server' \
+  'alice||token-alice-example.ghe.com.evil.test|example.ghe.com.evil.test' \
+  "$(cd "$personal" && run --host example.ghe.com.evil.test alice -- sh -c "$show_env")"
 
 check 'GH_AS_REMOTE selects the remote' \
   'alice-work' \

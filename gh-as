@@ -46,8 +46,9 @@ Environment:
   GH_AS_REMOTE  remote to resolve the account from (default: origin)
   GH_AS_QUIET   non-empty implies --quiet
 
-The token is handed to the command as GH_TOKEN (GH_ENTERPRISE_TOKEN off
-github.com), together with GH_AS_ACCOUNT. Nothing outside the process changes.
+The token is handed to the command as GH_TOKEN on github.com and *.ghe.com
+(GH_ENTERPRISE_TOKEN for Enterprise Server), together with GH_AS_ACCOUNT and
+GH_HOST. Nothing outside the process changes.
 
 As a git credential helper (installed by --setup-git, invoked by git as
 `gh-as --git-credential get`) the same resolution runs on the URL git is
@@ -340,15 +341,19 @@ token=$(gh_clean auth token --hostname "$host" --user "$account" 2>/dev/null) ||
 [[ -n $token ]] ||
   die "no token for account '$account' on $host; logged in are: $(accounts "$host" | tr '\n' ' ')"
 
-if [[ $host == "$default_host" ]]; then
-  token_var=GH_TOKEN
-else
-  token_var=GH_ENTERPRISE_TOKEN
-fi
+# Match gh's host classification, including Enterprise Cloud with data residency.
+# Lowercase for comparison without requiring bash 4's case conversion syntax.
+case $(printf '%s' "$host" | tr '[:upper:]' '[:lower:]') in
+  github.com | *.github.com | github.localhost | *.github.localhost | *.ghe.com)
+    token_var=GH_TOKEN
+    ;;
+  *)
+    token_var=GH_ENTERPRISE_TOKEN
+    ;;
+esac
 
 env_args=(-u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN)
-env_args+=("$token_var=$token" "GH_AS_ACCOUNT=$account")
-[[ $host == "$default_host" ]] || env_args+=("GH_HOST=$host")
+env_args+=("$token_var=$token" "GH_AS_ACCOUNT=$account" "GH_HOST=$host")
 
 [[ -n $quiet ]] || printf '%s: running as %s\n' "$program" "$account" >&2
 

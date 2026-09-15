@@ -163,9 +163,10 @@ afterwards. The same applies to any tool that rewrites that list.
 ## GitHub Enterprise
 
 The host comes from the remote URL in resolution mode, from `--host` or
-`GH_HOST` otherwise. Off `github.com` the token is passed as
-`GH_ENTERPRISE_TOKEN` and `GH_HOST` is set for the command, matching how `gh`
-itself reads enterprise credentials.
+`GH_HOST` otherwise. The token is passed as `GH_TOKEN` for `github.com` and
+Enterprise Cloud hosts under `*.ghe.com`, and as `GH_ENTERPRISE_TOKEN` for
+GitHub Enterprise Server. The resolved host is always passed as `GH_HOST`,
+including when `--host github.com` overrides an inherited enterprise host.
 
 ## Reference
 
@@ -213,8 +214,9 @@ one of them as above.
 
 ```console
 ./test/test.sh                 # runs against a stub gh; no account, no network
-shellcheck gh-as test/test.sh
-shfmt -d gh-as test/test.sh    # style comes from .editorconfig
+./test/host-isolation.sh       # real gh with temporary dummy credentials; no network
+shellcheck gh-as test/*.sh
+shfmt -d gh-as test/*.sh    # style comes from .editorconfig
 ```
 
 When the clone is also the installed helper, the clone's working tree is the
