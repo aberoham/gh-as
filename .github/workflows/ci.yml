@@ -15,8 +15,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: mfinelli/setup-shfmt@a25fda4c1fe115aec0f85e04126610841bc3141d # v4.0.1
-      - run: shellcheck gh-as test/test.sh
-      - run: shfmt -d gh-as test/test.sh
+      - run: shellcheck gh-as test/*.sh
+      - run: shfmt -d gh-as test/*.sh
 
   test:
     strategy:
@@ -32,3 +32,4 @@ jobs:
         with:
           persist-credentials: false
       - run: ./test/test.sh
+      - run: ./test/host-isolation.sh
