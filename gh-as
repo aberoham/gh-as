@@ -19,7 +19,7 @@ gh-as - run a command as one of the accounts gh is logged in with, without
 switching the account the rest of the machine sees.
 
 Usage:
-  gh-as <command> [args...]                account resolved from the repository
+  gh-as [--] <command> [args...]           account resolved from the repository
   gh-as <account> -- <command> [args...]   account named explicitly
   gh-as --print [<account>]
   gh-as --list
@@ -65,14 +65,15 @@ gh_clean() {
 # `gh auth status` is the only interface that enumerates accounts: hosts.yml
 # holds no tokens under a keyring setup and needs a YAML parser besides.
 accounts() {
-  gh_clean auth status --hostname "$1" 2>&1 |
+  # Validation can fail while still listing stored accounts. Keep those names,
+  # including failed accounts, so a failed check never makes us guess another.
+  { gh_clean auth status --hostname "$1" 2>&1 || :; } |
     grep -oE 'account [^ ]+' | cut -d' ' -f2 | sort -u
 }
 
 normalize_url() {
   local url=$1 authority path
   url=${url%/}
-  url=${url%.git}
   case $url in
     *://*) url=${url#*://} ;;
     *:*) url=${url/:/\/} ;;
@@ -221,16 +222,6 @@ setup_git() {
   git config --global --get-all "$section.helper" | sed "s|^|  $section.helper = |" >&2
 }
 
-has_separator() {
-  local arg
-  for arg in "$@"; do
-    if [[ $arg == -- ]]; then
-      return 0
-    fi
-  done
-  return 1
-}
-
 account=
 setup=
 while [[ $# -gt 0 ]]; do
@@ -277,10 +268,12 @@ while [[ $# -gt 0 ]]; do
       die "unknown option: $1"
       ;;
     *)
-      has_separator "$@" || break
-      [[ -z $account ]] || die "more than one account given"
+      # Only the documented <account> -- prefix belongs to us. Once the
+      # command starts, leave all of its arguments untouched.
+      [[ ${2:-} == -- ]] || break
       account=$1
-      shift
+      shift 2
+      break
       ;;
   esac
 done

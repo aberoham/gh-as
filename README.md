@@ -66,11 +66,16 @@ on the next `gh as` or `git fetch`.
 ## Usage
 
 ```console
-gh-as <command> [args...]                # account resolved from the repository
+gh-as [--] <command> [args...]           # account resolved from the repository
 gh-as <account> -- <command> [args...]   # account named explicitly
 gh-as --print [<account>]                # print the account, run nothing
 gh-as --list                             # accounts logged in on the host
 ```
+
+Put wrapper options before the account or command. The prefix `<account> --`
+selects an account; a later `--` belongs to the command. If the command itself
+starts with `<command> --`, use a leading separator to make that unambiguous:
+`gh-as -- printf -- hello`.
 
 The command is not limited to `gh` — anything that reads `GH_TOKEN` works:
 `gh` extensions, a `curl` call against the API, your own release scripts.
@@ -106,6 +111,18 @@ section, so an organization overrides the host-wide default:
 [gh-as "https://github.com/acme"]
   account = alice-work
 ```
+
+Repository-specific URL rules must match the remote path, including `.git`
+when present. For example, a remote `https://github.com/acme/service.git`
+uses `[gh-as "https://github.com/acme/service.git"]`. Organization-wide rules
+such as `[gh-as "https://github.com/acme"]` match repositories with or without
+that suffix. SSH remotes are converted to HTTPS form for the lookup.
+
+Account discovery keeps stored account names even when `gh auth status`
+reports an authentication error. A failed account still counts when checking
+whether there is only one account; it does not cause another account to be
+selected automatically. Selecting an account does not establish that its token
+is valid.
 
 If you already pin credentials per URL, step 2 reads the account straight out
 of that mapping and no `gh-as` section is needed.
