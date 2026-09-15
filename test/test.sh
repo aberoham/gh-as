@@ -47,6 +47,10 @@ case $subcommand in
     for account in ${GH_STUB_ACCOUNTS}; do
       echo "  ✓ Logged in to $host account $account (keyring)"
     done
+    for account in ${GH_STUB_INVALID_ACCOUNTS:-}; do
+      echo "  X Failed to log in to $host account $account (keyring)" >&2
+    done
+    exit "${GH_STUB_STATUS_EXIT:-0}"
     ;;
   "auth token")
     for account in ${GH_STUB_ACCOUNTS:-}; do
@@ -136,6 +140,38 @@ check 'the only logged-in account is used when nothing else matches' \
   'solo' \
   "$(cd "$unmapped" && GH_STUB_ACCOUNTS=solo "$gh_as" --print 2>/dev/null)"
 
+# A delimiter after the command's first argument belongs to the command.
+check 'command arguments preserve a later separator and an empty argument' \
+  '<--><><two words>' \
+  "$(cd "$personal" && run sh -c 'printf "<%s>" "$@"' _ -- '' 'two words')"
+
+# `<account> --` stays reserved; a leading -- disambiguates command names.
+check 'a leading separator permits a command immediately followed by --' \
+  'hello' "$(cd "$personal" && run -- printf -- hello)"
+
+check 'an explicit account preserves separators in command arguments' \
+  '<--><><two words>' \
+  "$(cd "$personal" && run alice-work -- sh -c 'printf "<%s>" "$@"' _ -- '' 'two words')"
+
+check 'account discovery survives a failed authentication check' \
+  'solo|token-solo-github.com||github.com' \
+  "$(cd "$unmapped" && GH_STUB_ACCOUNTS=solo GH_STUB_STATUS_EXIT=1 run sh -c "$show_env")"
+
+check 'an exact .git URL mapping overrides the organization mapping' \
+  'alice' \
+  "$(cd "$work" && git config 'gh-as.https://github.com/acme/service.git.account' alice && run --print)"
+git -C "$work" config --unset 'gh-as.https://github.com/acme/service.git.account'
+
+check 'an exact .git credential mapping works for an scp-style remote' \
+  'alice' \
+  "$(cd "$scp_style" && git config 'credential.https://github.com/acme/service.git.username' alice && run --print)"
+git -C "$scp_style" config --unset 'credential.https://github.com/acme/service.git.username'
+
+suffixless=$(repo suffixless https://github.com/nobody/thing)
+git -C "$suffixless" config 'gh-as.https://github.com/nobody/thing.account' alice-work
+check 'an exact mapping still works for a remote without .git' \
+  'alice-work' "$(cd "$suffixless" && run --print)"
+
 check 'inherited tokens are cleared before asking gh' \
   'alice-work|token-alice-work-github.com||github.com' \
   "$(cd "$personal" && GH_TOKEN=ambient run alice-work -- sh -c "$show_env")"
@@ -200,6 +236,19 @@ check 'help exits successfully' 'ok' "$("$gh_as" --help >/dev/null && echo ok)"
 check '--list enumerates the accounts' \
   'alice alice-work' \
   "$("$gh_as" --list | tr '\n' ' ' | perl -pe 's/ $//')"
+
+check '--list returns all stored names despite authentication errors' \
+  'alice
+alice-work
+|ok' \
+  "$(GH_STUB_ACCOUNTS=alice GH_STUB_INVALID_ACCOUNTS=alice-work GH_STUB_STATUS_EXIT=1 run --list && printf '|ok')"
+
+check 'a failed account check still prevents guessing between accounts' \
+  'gh-as: cannot tell which account this repository belongs to; name one of: alice alice-work' \
+  "$(cd "$unmapped" && GH_STUB_ACCOUNTS=alice GH_STUB_INVALID_ACCOUNTS=alice-work GH_STUB_STATUS_EXIT=1 "$gh_as" --print 2>&1)"
+
+fails 'empty account discovery remains an error' \
+  at "$unmapped" env GH_STUB_ACCOUNTS= "$gh_as" --print
 
 # --- git credential helper ---------------------------------------------------
 
@@ -313,6 +362,14 @@ check 'git credential fill does not match a lookalike organization prefix' \
   '' "$(fill https://github.com/acme-labs/thing.git)"
 check 'git credential fill honours a user in the remote URL' \
   'alice-work' "$(fill https://alice-work@github.com/alice/blog.git)"
+
+GIT_CONFIG_GLOBAL=$setup_config git config --global 'gh-as.https://github.com/acme/service.git.account' alice
+check 'git credential fill applies an exact .git mapping over an organization default' \
+  'alice' "$(fill https://github.com/acme/service.git)"
+check 'an exact .git mapping does not affect a sibling repository' \
+  'alice-work' "$(fill https://github.com/acme/other.git)"
+check 'an exact .git mapping does not match a remote without that suffix' \
+  'alice-work' "$(fill https://github.com/acme/service)"
 
 printf '\n%d passed, %d failed\n' "$passed" "$failed"
 [ "$failed" -eq 0 ]
