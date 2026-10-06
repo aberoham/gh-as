@@ -70,6 +70,7 @@ gh-as [--] <command> [args...]           # account resolved from the repository
 gh-as <account> -- <command> [args...]   # account named explicitly
 gh-as --print [<account>]                # print the account, run nothing
 gh-as --list                             # accounts logged in on the host
+gh-as --setup-ssh [<account>]            # route authorized organizations over SSH
 ```
 
 Put wrapper options before the account or command. The prefix `<account> --`
@@ -177,6 +178,43 @@ A username git has already resolved, from `credential.username` or a
 helper, so running it again later removes `gh-as`; rerun `gh as --setup-git`
 afterwards. The same applies to any tool that rewrites that list.
 
+## SSH for organizations with single sign-on
+
+After a browser login, `gh` holds an OAuth app token. In an organization that
+enforces SAML single sign-on, GitHub honours that token only while your session
+with the organization lasts, a day unless the identity provider sets otherwise,
+so git over HTTPS stops working there until you sign in again. An SSH key
+authorized for an organization's single sign-on stays authorized until it is
+revoked.
+
+```console
+$ gh as --setup-ssh alice-work
+ssh     acme
+https   acme-labs (key not authorized for single sign-on)
+skipped acme-oss (no non-public repository to test against)
+gh-as: 1 organization(s) routed over SSH, 0 rule(s) removed, 1 skipped, 0 failed
+gh-as: authorize the key for these at https://github.com/settings/keys (Configure SSO), then rerun:
+  acme-labs
+```
+
+For each organization the account belongs to, `--setup-ssh` reads one
+non-public repository with `git ls-remote` over SSH. Where that works it adds
+`url.git@github.com:<org>/.insteadOf https://github.com/<org>/` to the global
+git config, so existing HTTPS remotes fetch and push over SSH without being
+edited. Where GitHub refuses the key for single sign-on it removes any such
+rule, leaving HTTPS in place. Rerun it after authorizing more organizations.
+
+It refuses to start unless the key GitHub accepts belongs to the named
+account, since the rewrite hands that organization's git traffic to the key's
+owner. Any SSH failure other than a single sign-on refusal, such as an agent
+declining to sign, stops the run with that organization's rule untouched, and
+so does a repository listing that fails. All probes share one multiplexed
+connection that stays open until the run ends, so an agent that asks before
+signing asks once per run.
+
+Pull requests, issues and everything else that goes through the API still use
+`gh`'s token; SSH covers git only.
+
 ## GitHub Enterprise
 
 The host comes from the remote URL in resolution mode, from `--host` or
@@ -194,6 +232,7 @@ including when `--host github.com` overrides an inherited enterprise host.
 | `-q`, `--quiet` | Do not announce the account on stderr |
 | `--host HOST` | Host to take the account from |
 | `--setup-git` | Install gh-as as git's credential helper for the host |
+| `--setup-ssh [ACCOUNT]` | Route each organization the account's SSH key is authorized for over SSH |
 | `--git-credential OP` | The git credential helper entry point; git calls it, you do not |
 | `-h`, `--help` | Show help |
 

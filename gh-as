@@ -25,6 +25,10 @@ Usage:
   gh-as --list
   gh-as --setup-git [--host HOST]          make git fetch and push resolve the
                                            same way (writes ~/.gitconfig)
+  gh-as --setup-ssh [--host HOST] [<account>]
+                                           fetch over SSH from every organization
+                                           the account's key is authorized for
+                                           (writes ~/.gitconfig; rerun freely)
 
 Options:
   -l, --list       List the accounts logged in on the host
@@ -33,6 +37,10 @@ Options:
       --host HOST  Host to take the account from (default: $GH_HOST, the
                    remote's host, or github.com)
       --setup-git  Install gh-as as git's credential helper for the host
+      --setup-ssh  Probe each of the account's organizations over SSH and
+                   rewrite https://HOST/<org>/ to SSH where the key works,
+                   removing the rewrite only where GitHub refuses the key
+                   for single sign-on
   -h, --help       Show this help
 
 Account resolution, in order:
@@ -222,6 +230,175 @@ setup_git() {
   git config --global --get-all "$section.helper" | sed "s|^|  $section.helper = |" >&2
 }
 
+# The variable gh reads a host's token from. Match gh's host classification,
+# including Enterprise Cloud with data residency. Lowercase for comparison
+# without requiring bash 4's case conversion syntax.
+token_var_for() {
+  case $(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') in
+    github.com | *.github.com | github.localhost | *.github.localhost | *.ghe.com)
+      printf 'GH_TOKEN\n'
+      ;;
+    *)
+      printf 'GH_ENTERPRISE_TOKEN\n'
+      ;;
+  esac
+}
+
+# Runs gh with one account's token and nothing inherited.
+gh_with_token() {
+  local with_host=$1 with_token=$2
+  shift 2
+  env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
+    "$(token_var_for "$with_host")=$with_token" GH_HOST="$with_host" gh "$@"
+}
+
+# Every SSH connection --setup-ssh makes shares one multiplexed session, so the
+# key signs once per run instead of once per organization. An agent that asks
+# for approval, as 1Password's does, would otherwise prompt fifty times, and a
+# refusal partway through would read as a missing authorization.
+control_dir=
+control_host=
+ssh_command='ssh -o BatchMode=yes'
+
+# The directory sits directly under /tmp because a control socket path must
+# fit in about a hundred bytes, which macOS's per-user temporary directory
+# nearly exhausts on its own.
+open_control() {
+  control_host=$1
+  control_dir=$(mktemp -d /tmp/gh-as.XXXXXX)
+  # The master lives until close_control stops it, however long the API
+  # listing between probes takes; a timed expiry would mean a second signature.
+  ssh_command="ssh -o BatchMode=yes -o ControlMaster=auto -o ControlPath=$control_dir/%C -o ControlPersist=yes"
+  trap close_control EXIT
+}
+
+close_control() {
+  [[ -n $control_dir ]] || return 0
+  # shellcheck disable=SC2086  # ssh_command is a word list by construction.
+  $ssh_command -O exit "git@$control_host" >/dev/null 2>&1 </dev/null || true
+  rm -f "$control_dir"/* 2>/dev/null || true
+  rmdir "$control_dir" 2>/dev/null || true
+  control_dir=
+}
+
+# The login GitHub greets an SSH connection with, or nothing when no key is
+# accepted. `ssh -T` exits 1 even on success, so the greeting is the signal.
+ssh_login() {
+  local greeting
+  # shellcheck disable=SC2086  # ssh_command is a word list by construction.
+  greeting=$($ssh_command -T "git@$1" 2>&1 </dev/null) || true
+  printf '%s\n' "$greeting" | sed -n 's/^Hi \([^!]*\)!.*/\1/p' | sed -n 1p
+}
+
+# Reads one repository over SSH. Returns 0 when git can, 1 when GitHub refuses
+# the key for single sign-on, and 2 for any other failure, whose message goes
+# to stderr. Only the second is evidence about authorization: an agent that
+# declines to sign or a dropped connection says nothing about the organization.
+#
+# The refusal is recognized by GitHub's own sentence naming this organization,
+# and only when nothing in the output says the key itself was rejected: a
+# notice that merely mentions single sign-on, beside an agent that refused to
+# sign, must not cost the organization its rule.
+ssh_probe() {
+  local out
+  out=$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND=$ssh_command \
+    git ls-remote "git@$1:$2/$3.git" HEAD 2>&1 >/dev/null) && return 0
+  case $out in
+    *"Permission denied"* | *"agent refused"* | *"signing failed"*) ;;
+    *"The '$2' organization has enabled or enforced SAML SSO"*) return 1 ;;
+  esac
+  printf '%s\n' "$out" >&2
+  return 2
+}
+
+# Judges one organization and updates its rule. Counters are setup_ssh's
+# locals, which bash's dynamic scoping makes visible here.
+route_org() {
+  local org=$1 key=url.git@$ssh_host:$1/.insteadOf repos repo status=0
+
+  # A failed listing must not pass for an organization with nothing to test,
+  # so its status is checked before its output is read.
+  if ! repos=$(gh_with_token "$ssh_host" "$token" api "orgs/$org/repos?per_page=100&type=all" \
+    --hostname "$ssh_host" --paginate \
+    --jq '.[] | select(.visibility != "public") | .name' 2>&1); then
+    failed=$((failed + 1))
+    printf 'error   %s (could not list repositories: %s)\n' "$org" "$(printf '%s' "$repos" | tr '\n' ' ')"
+    return 0
+  fi
+  repo=$(printf '%s\n' "$repos" | sed -n 1p)
+  if [[ -z $repo ]]; then
+    skipped=$((skipped + 1))
+    printf 'skipped %s (no non-public repository to test against)\n' "$org"
+    return 0
+  fi
+
+  ssh_probe "$ssh_host" "$org" "$repo" || status=$?
+  case $status in
+    0)
+      git config --global --replace-all "$key" "https://$ssh_host/$org/"
+      routed=$((routed + 1))
+      printf 'ssh     %s\n' "$org"
+      ;;
+    1)
+      # A rule left in place for an organization the key cannot reach would
+      # break git there, where HTTPS might still work while a session lasts.
+      if git config --global --get-all "$key" >/dev/null 2>&1; then
+        git config --global --unset-all "$key"
+        removed=$((removed + 1))
+      fi
+      pending="$pending $org"
+      printf 'https   %s (key not authorized for single sign-on)\n' "$org"
+      ;;
+    *)
+      die "SSH to $org/$repo failed for a reason other than single sign-on (above); stopped with $org's rule unchanged. If the SSH agent asked to approve the key, approve it and rerun."
+      ;;
+  esac
+}
+
+# Route an account's organizations over SSH wherever its key is authorized for
+# single sign-on. An OAuth token, which is what gh holds after a browser login,
+# works in a SAML organization only while that organization's session lasts;
+# an authorized SSH key stays authorized until it is revoked. Each organization
+# is probed with git itself against a non-public repository, because a public
+# one answers whether or not the key is authorized, and the API answers even
+# when git over HTTPS is refused.
+setup_ssh() {
+  local ssh_account=$1 ssh_host=$2 token login orgs org
+  local routed=0 removed=0 pending='' skipped=0 failed=0
+
+  token=$(gh_clean auth token --hostname "$ssh_host" --user "$ssh_account" 2>/dev/null) || token=
+  [[ -n $token ]] ||
+    die "no token for account '$ssh_account' on $ssh_host; logged in are: $(accounts "$ssh_host" | tr '\n' ' ')"
+
+  # Routing an organization over SSH hands its fetches to whichever account
+  # owns the key, so a key belonging to someone else must stop everything.
+  open_control "$ssh_host"
+  login=$(ssh_login "$ssh_host")
+  [[ -n $login ]] ||
+    die "no SSH key is accepted by $ssh_host; add one to $ssh_account and check with: ssh -T git@$ssh_host"
+  [[ $login == "$ssh_account" ]] ||
+    die "the SSH key $ssh_host accepts belongs to '$login', not '$ssh_account'; pin the right key for $ssh_host in ~/.ssh/config"
+
+  orgs=$(gh_with_token "$ssh_host" "$token" api 'user/orgs?per_page=100' \
+    --hostname "$ssh_host" --paginate --jq '.[].login') ||
+    die "could not list the organizations of $ssh_account on $ssh_host"
+
+  for org in $orgs; do
+    route_org "$org"
+  done
+
+  printf '%s: %d organization(s) routed over SSH, %d rule(s) removed, %d skipped, %d failed\n' \
+    "$program" "$routed" "$removed" "$skipped" "$failed" >&2
+  if [[ -n $pending ]]; then
+    printf '%s: authorize the key for these at https://%s/settings/keys (Configure SSO), then rerun:\n ' \
+      "$program" "$ssh_host" >&2
+    # shellcheck disable=SC2086  # Organization logins hold no spaces; split on purpose.
+    printf ' %s' $pending >&2
+    printf '\n' >&2
+  fi
+  [[ $failed -eq 0 ]] || die "$failed organization(s) could not be checked and kept their rules; see the error lines above"
+}
+
 account=
 setup=
 while [[ $# -gt 0 ]]; do
@@ -243,8 +420,9 @@ while [[ $# -gt 0 ]]; do
       credential_helper "$2"
       exit 0
       ;;
-    --setup-git)
-      setup=1
+    --setup-git | --setup-ssh)
+      [[ -z $setup || $setup == "${1#--setup-}" ]] || die "--setup-git and --setup-ssh cannot be combined"
+      setup=${1#--setup-}
       shift
       ;;
     -p | --print)
@@ -278,9 +456,22 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -n $setup ]]; then
+if [[ $setup == git ]]; then
   [[ $# -eq 0 && -z $account && -z $print_only ]] || die "--setup-git takes only --host"
   setup_git "${host:-$default_host}"
+  exit 0
+fi
+
+if [[ $setup == ssh ]]; then
+  # The account may arrive before a `--` or as the lone remaining argument,
+  # never both, and nothing else may follow it.
+  [[ -z $print_only && $# -le 1 ]] || die "--setup-ssh takes at most an account and --host"
+  [[ $# -eq 0 || -z $account ]] || die "more than one account given"
+  [[ $# -eq 0 ]] || account=$1
+  host=${host:-$default_host}
+  # With no account named, only a single login is unambiguous.
+  [[ -n $account ]] || account=$(resolve_account '' "$host")
+  setup_ssh "$account" "$host"
   exit 0
 fi
 
@@ -334,16 +525,7 @@ token=$(gh_clean auth token --hostname "$host" --user "$account" 2>/dev/null) ||
 [[ -n $token ]] ||
   die "no token for account '$account' on $host; logged in are: $(accounts "$host" | tr '\n' ' ')"
 
-# Match gh's host classification, including Enterprise Cloud with data residency.
-# Lowercase for comparison without requiring bash 4's case conversion syntax.
-case $(printf '%s' "$host" | tr '[:upper:]' '[:lower:]') in
-  github.com | *.github.com | github.localhost | *.github.localhost | *.ghe.com)
-    token_var=GH_TOKEN
-    ;;
-  *)
-    token_var=GH_ENTERPRISE_TOKEN
-    ;;
-esac
+token_var=$(token_var_for "$host")
 
 env_args=(-u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN)
 env_args+=("$token_var=$token" "GH_AS_ACCOUNT=$account" "GH_HOST=$host")
