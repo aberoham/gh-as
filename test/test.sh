@@ -31,13 +31,39 @@ while [ $# -gt 0 ]; do
 done
 
 # gh-as must clear inherited tokens before asking, or the answer is whatever
-# the environment happened to carry.
-if [ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}${GH_ENTERPRISE_TOKEN:-}${GITHUB_ENTERPRISE_TOKEN:-}" ]; then
-  echo "AMBIENT-TOKEN-LEAKED"
-  exit 0
-fi
+# the environment happened to carry. API calls are the exception: those are
+# made with the chosen account's token on purpose.
+case $subcommand in
+  auth*)
+    if [ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}${GH_ENTERPRISE_TOKEN:-}${GITHUB_ENTERPRISE_TOKEN:-}" ]; then
+      echo "AMBIENT-TOKEN-LEAKED"
+      exit 0
+    fi
+    ;;
+esac
 
 case $subcommand in
+  "api user/orgs"*)
+    if [ "${GH_TOKEN:-}" != "token-${GH_STUB_ORGS_OF:-}-github.com" ]; then
+      echo "stub gh: api called with the wrong token: ${GH_TOKEN:-none}" >&2
+      exit 2
+    fi
+    for org in ${GH_STUB_ORGS:-}; do echo "$org"; done
+    ;;
+  "api orgs/"*)
+    org=${subcommand#api orgs/}
+    org=${org%%/*}
+    case " ${GH_STUB_API_FAILS:-} " in
+      *" $org "*)
+        echo "HTTP 403: Resource protected by organization SAML enforcement" >&2
+        exit 1
+        ;;
+    esac
+    case " ${GH_STUB_PUBLIC_ONLY:-} " in
+      *" $org "*) ;;
+      *) echo secret ;;
+    esac
+    ;;
   "auth status")
     if [ -z "${GH_STUB_ACCOUNTS:-}" ]; then
       echo "You are not logged into any GitHub hosts." >&2
@@ -69,6 +95,48 @@ case $subcommand in
 esac
 STUB
 chmod +x "$tmp/bin/gh"
+
+# Stands in for GitHub's SSH endpoint. With no remote command it greets the
+# key's owner as `ssh -T` does; for git-upload-pack it serves an empty
+# repository when the organization is in GH_STUB_SSH_OK, and refuses otherwise.
+cat >"$tmp/bin/ssh" <<'STUB'
+#!/usr/bin/env bash
+last=${*: -1}
+case $last in
+  git-upload-pack*)
+    org=${last#*\'}
+    org=${org#/}
+    org=${org%%/*}
+    case " ${GH_STUB_SSH_REFUSED:-} " in
+      *" $org "*)
+        # A server notice that happens to mention single sign-on must not
+        # turn an agent failure into an authorization verdict.
+        [ -z "${GH_STUB_SSH_BANNER:-}" ] ||
+          echo "ERROR: The '$org' organization has enabled or enforced SAML SSO." >&2
+        echo 'sign_and_send_pubkey: signing failed for ED25519 "key" from agent: agent refused operation' >&2
+        echo 'git@github.com: Permission denied (publickey).' >&2
+        exit 255
+        ;;
+    esac
+    case " ${GH_STUB_SSH_OK:-} " in
+      *" $org "*) printf '0000' ;;
+      *)
+        echo "ERROR: The '$org' organization has enabled or enforced SAML SSO." >&2
+        exit 128
+        ;;
+    esac
+    ;;
+  *)
+    if [ -n "${GH_STUB_SSH_LOGIN:-}" ]; then
+      echo "Hi $GH_STUB_SSH_LOGIN! You've successfully authenticated, but GitHub does not provide shell access." >&2
+    else
+      echo "git@github.com: Permission denied (publickey)." >&2
+    fi
+    exit 1
+    ;;
+esac
+STUB
+chmod +x "$tmp/bin/ssh"
 
 export PATH=$tmp/bin:$PATH
 export GIT_CONFIG_NOSYSTEM=1
@@ -370,6 +438,91 @@ check 'an exact .git mapping does not affect a sibling repository' \
   'alice-work' "$(fill https://github.com/acme/other.git)"
 check 'an exact .git mapping does not match a remote without that suffix' \
   'alice-work' "$(fill https://github.com/acme/service)"
+
+# --- --setup-ssh --------------------------------------------------------------
+
+ssh_config=$tmp/ssh-gitconfig
+# acme accepts the key, beta refuses it, pub has nothing but public repositories.
+setup_ssh() {
+  GIT_CONFIG_GLOBAL=$ssh_config GH_STUB_ORGS_OF=alice GH_STUB_ORGS='acme beta pub' \
+    GH_STUB_PUBLIC_ONLY=pub GH_STUB_SSH_OK=acme GH_STUB_SSH_LOGIN=${GH_STUB_SSH_LOGIN-alice} \
+    "$gh_as" --setup-ssh "$@" 2>"$tmp/ssh-stderr"
+}
+control_dirs() {
+  # The trailing slash follows /tmp where it is a symlink, as on macOS.
+  find /tmp/ -maxdepth 1 -name 'gh-as.*' 2>/dev/null | wc -l | tr -d ' '
+}
+dirs_before=$(control_dirs)
+rules() {
+  GIT_CONFIG_GLOBAL=$ssh_config git config --global --get-regexp '^url\.' | tr '\n' ';'
+}
+
+: >"$ssh_config"
+check '--setup-ssh reports each organization' \
+  'ssh     acme;https   beta (key not authorized for single sign-on);skipped pub (no non-public repository to test against);' \
+  "$(setup_ssh alice | tr '\n' ';')"
+check '--setup-ssh rewrites only the organization the key reaches' \
+  'url.git@github.com:acme/.insteadof https://github.com/acme/;' "$(rules)"
+
+first=$(cat "$ssh_config")
+setup_ssh alice >/dev/null
+check '--setup-ssh is idempotent' "$first" "$(cat "$ssh_config")"
+
+GIT_CONFIG_GLOBAL=$ssh_config git config --global 'url.git@github.com:beta/.insteadOf' https://github.com/beta/
+setup_ssh alice >/dev/null
+check '--setup-ssh removes a rule the key can no longer use' \
+  'url.git@github.com:acme/.insteadof https://github.com/acme/;' "$(rules)"
+
+# A refused signature says nothing about authorization, so the run must stop
+# and leave the rule it was about to judge exactly where it was.
+agent_refuses_acme() { GH_STUB_SSH_REFUSED=acme setup_ssh alice; }
+fails '--setup-ssh stops when the SSH agent refuses to sign' agent_refuses_acme
+check '--setup-ssh keeps the rule of an organization it could not judge' \
+  'url.git@github.com:acme/.insteadof https://github.com/acme/;' "$(rules)"
+check '--setup-ssh says why it stopped' 'ok' \
+  "$(grep -q 'failed for a reason other than single sign-on' "$tmp/ssh-stderr" && echo ok)"
+check '--setup-ssh removes its control directory after stopping' "$dirs_before" "$(control_dirs)"
+
+agent_refuses_with_banner() { GH_STUB_SSH_BANNER=1 GH_STUB_SSH_REFUSED=acme setup_ssh alice; }
+fails '--setup-ssh stops on an agent failure that mentions single sign-on' agent_refuses_with_banner
+check '--setup-ssh keeps the rule when single sign-on is mentioned beside a key failure' \
+  'url.git@github.com:acme/.insteadof https://github.com/acme/;' "$(rules)"
+
+# A repository listing that fails must not look like an organization with
+# nothing to test: its rule stays, the line says why, and the run fails.
+GIT_CONFIG_GLOBAL=$ssh_config git config --global 'url.git@github.com:beta/.insteadOf' https://github.com/beta/
+api_fails_for_beta() { GH_STUB_API_FAILS=beta setup_ssh alice; }
+fails '--setup-ssh fails when a repository listing fails' api_fails_for_beta
+check '--setup-ssh reports the failed listing' \
+  'error   beta (could not list repositories: HTTP 403: Resource protected by organization SAML enforcement)' \
+  "$(api_fails_for_beta | grep '^error')"
+check '--setup-ssh keeps the rule of an organization it could not list' \
+  'url.git@github.com:acme/.insteadof https://github.com/acme/;url.git@github.com:beta/.insteadof https://github.com/beta/;' \
+  "$(rules)"
+GIT_CONFIG_GLOBAL=$ssh_config git config --global --unset-all 'url.git@github.com:beta/.insteadOf'
+
+setup_ssh alice >/dev/null
+check '--setup-ssh removes its control directory after succeeding' "$dirs_before" "$(control_dirs)"
+
+check 'git follows the rewrite over SSH' 'ok' \
+  "$(GIT_CONFIG_GLOBAL=$ssh_config GH_STUB_SSH_OK=acme GIT_TERMINAL_PROMPT=0 \
+    git ls-remote https://github.com/acme/secret.git >/dev/null 2>&1 && echo ok)"
+
+: >"$ssh_config"
+key_of_bob() { GH_STUB_SSH_LOGIN=bob setup_ssh alice; }
+no_key() { GH_STUB_SSH_LOGIN='' setup_ssh alice; }
+fails '--setup-ssh refuses a key that belongs to another account' key_of_bob
+check '--setup-ssh writes nothing when the key is another account'"'"'s' '' "$(rules)"
+fails '--setup-ssh refuses when no key is accepted' no_key
+fails '--setup-ssh needs an account when several are logged in' setup_ssh
+check '--setup-ssh uses the only logged-in account' 'ssh     acme' \
+  "$(GH_STUB_ACCOUNTS=alice setup_ssh | sed -n 1p)"
+fails '--setup-ssh refuses a second account' "$gh_as" --setup-ssh alice bob
+fails '--setup-ssh refuses a second account after a separator' "$gh_as" --setup-ssh bob -- alice
+fails '--setup-ssh refuses --print' "$gh_as" --setup-ssh --print alice
+fails '--setup-ssh and --setup-git cannot be combined' "$gh_as" --setup-ssh --setup-git
+check '--setup-ssh accepts an account before a bare separator' 'ssh     acme' \
+  "$(setup_ssh alice -- | sed -n 1p)"
 
 printf '\n%d passed, %d failed\n' "$passed" "$failed"
 [ "$failed" -eq 0 ]
