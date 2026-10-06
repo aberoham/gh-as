@@ -458,9 +458,12 @@ rules() {
 }
 
 : >"$ssh_config"
+before=$failed
 check '--setup-ssh reports each organization' \
   'ssh     acme;https   beta (key not authorized for single sign-on);skipped pub (no non-public repository to test against);' \
   "$(setup_ssh alice | tr '\n' ';')"
+# Every later check depends on this run, so show why it went wrong.
+[ "$failed" -eq "$before" ] || sed 's/^/     stderr: /' "$tmp/ssh-stderr"
 check '--setup-ssh rewrites only the organization the key reaches' \
   'url.git@github.com:acme/.insteadof https://github.com/acme/;' "$(rules)"
 
