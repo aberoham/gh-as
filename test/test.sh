@@ -119,7 +119,12 @@ case $last in
         ;;
     esac
     case " ${GH_STUB_SSH_OK:-} " in
-      *" $org "*) printf '0000' ;;
+      *" $org "*)
+        # git answers the advertisement with a flush packet; reading it before
+        # exiting keeps git's write from hitting a closed pipe on Windows.
+        printf '0000'
+        cat >/dev/null
+        ;;
       *)
         echo "ERROR: The '$org' organization has enabled or enforced SAML SSO." >&2
         exit 128
